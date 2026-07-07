@@ -8,10 +8,16 @@ import { RESCHEDULE_WIDGET_URL } from "../lib/constants";
 /**
  * ConfirmStep — Step 4 de admisión (Bloque E)
  *
- * Consulta la próxima cita del lead con un fetch fresco a /api/appointment
- * (NO usa el dato cacheado del login — el lead pudo haber agendado después).
- * getNextAppointment() en lib/ghl.js solo devuelve startTime (ISO string),
- * así que el fin de la cita se calcula con una duración default.
+ * Consulta la próxima cita del lead con un fetch fresco a /api/appointment,
+ * SCOPED al calendario de Sales Call exclusivamente (ver lib/ghl.js).
+ * No usa el dato cacheado del login — el lead pudo haber agendado después.
+ *
+ * Al confirmar:
+ *  1) POST /api/appointment { appointmentId } -> cambia el appointmentStatus
+ *     real en GHL a "confirmed". Esto es CRÍTICO: si falla, se muestra
+ *     error y no se avanza.
+ *  2) POST /api/step-complete { contactId, step:4 } -> tag paso_4_completado,
+ *     fire-and-forget, solo tracking, no bloquea si falla.
  *
  * Props:
  *   contactId    (string, requerido)
@@ -92,12 +98,13 @@ function downloadIcs(title, start, end) {
 
 export default function ConfirmStep({ contactId, onComplete }) {
   const [loading, setLoading] = useState(true);
+  const [appointmentId, setAppointmentId] = useState(null);
   const [startTime, setStartTime] = useState(null);
   const [confirming, setConfirming] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
   const [error, setError] = useState("");
 
-  // Fetch fresco al montar — no depende de nada cacheado en el login.
+  // Fetch fresco al montar — scoped al calendario de Sales Call (ver lib/ghl.js).
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -106,9 +113,15 @@ export default function ConfirmStep({ contactId, onComplete }) {
           `/api/appointment?contactId=${encodeURIComponent(contactId)}`,
         );
         const data = await res.json();
-        if (!cancelled) setStartTime(data?.startTime || null);
+        if (!cancelled) {
+          setAppointmentId(data?.id || null);
+          setStartTime(data?.startTime || null);
+        }
       } catch {
-        if (!cancelled) setStartTime(null);
+        if (!cancelled) {
+          setAppointmentId(null);
+          setStartTime(null);
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -119,7 +132,7 @@ export default function ConfirmStep({ contactId, onComplete }) {
   }, [contactId]);
 
   const start = startTime ? new Date(startTime) : null;
-  const hasAppt = !!start && !isNaN(start);
+  const hasAppt = !!start && !isNaN(start) && !!appointmentId;
   const end = hasAppt
     ? new Date(start.getTime() + DEFAULT_DURATION_MIN * 60000)
     : null;
@@ -128,20 +141,38 @@ export default function ConfirmStep({ contactId, onComplete }) {
   async function confirm() {
     setConfirming(true);
     setError("");
+
+    // 1) Crítico: cambia el estado real de la cita en GHL a "confirmed".
     try {
-      const res = await fetch("/api/step-complete", {
+      const res = await fetch("/api/appointment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ appointmentId }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || "No pudimos confirmar tu cita.");
+      }
+    } catch (e) {
+      setError(e.message || "Ocurrió un error. Intenta de nuevo.");
+      setConfirming(false);
+      return; // no seguimos al tag si esto falló
+    }
+
+    // 2) No crítico: tag de tracking, fire-and-forget.
+    try {
+      await fetch("/api/step-complete", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ contactId, step: 4 }),
       });
-      if (!res.ok) throw new Error("No pudimos confirmar tu cita.");
-      setConfirmed(true);
-      if (typeof onComplete === "function") onComplete();
-    } catch (e) {
-      setError(e.message || "Ocurrió un error. Intenta de nuevo.");
-    } finally {
-      setConfirming(false);
+    } catch (_) {
+      // el estado de la cita ya quedó confirmado; el tag es solo tracking
     }
+
+    setConfirmed(true);
+    setConfirming(false);
+    if (typeof onComplete === "function") onComplete();
   }
 
   if (loading) {
@@ -223,7 +254,7 @@ export default function ConfirmStep({ contactId, onComplete }) {
           </a>
         </div>
       ) : (
-        // Edge case: no hay cita agendada todavía.
+        // Edge case: no hay cita en el calendario de Sales Call todavía.
         <div className="cs-card">
           <h3 className="cs-title">No hay fecha agendada aún</h3>
           <p className="cs-sub">
