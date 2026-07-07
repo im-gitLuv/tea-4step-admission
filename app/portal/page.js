@@ -3,7 +3,8 @@
 // ─────────────────────────────────────────────────────────────
 // /portal — Los 4 pasos de admisión.
 // Bloque C: pasos 1 y 2 completos (video + continuar + unlock).
-// Pasos 3 y 4: video funcional + placeholder (Bloques D y E).
+// Bloque D: Step 3 (FormWizard) cableado.
+// Bloque E: Step 4 (ConfirmStep) cableado — consulta cita fresca.
 // ─────────────────────────────────────────────────────────────
 
 import { useEffect, useState } from "react";
@@ -60,6 +61,8 @@ export default function PortalPage() {
     setProgress({ ...progress, current: id });
   }
 
+  // Único punto de avance de paso — lo llaman el botón "Continuar" (pasos 1-2),
+  // FormWizard (paso 3) y ConfirmStep (paso 4) al completar cada uno.
   async function completeStep(id) {
     if (completed.includes(id)) return;
     const newCompleted = [...completed, id];
@@ -160,7 +163,7 @@ export default function PortalPage() {
                       <br />
                       <FormWizard
                         contactId={contact.id}
-                        onComplete={() => handleStepComplete(3)} // tu handler que desbloquea el paso 4
+                        onComplete={() => completeStep(3)}
                       />
                     </div>
                   )}
@@ -181,8 +184,7 @@ export default function PortalPage() {
                       <br />
                       <ConfirmStep
                         contactId={contact.id}
-                        appointment={contact.appointment} // la que cargaste en el login
-                        onComplete={() => handleStepComplete(4)}
+                        onComplete={() => completeStep(4)}
                       />
                     </div>
                   )}
