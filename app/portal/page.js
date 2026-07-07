@@ -14,6 +14,8 @@ import Header from "@/components/Header";
 import StepNav from "@/components/StepNav";
 import SideProgress from "@/components/SideProgress";
 import VideoStep from "@/components/VideoStep";
+import FormWizard from "@/components/FormWizard";
+import ConfirmStep from "@/components/ConfirmStep";
 
 export default function PortalPage() {
   const router = useRouter();
@@ -156,8 +158,10 @@ export default function PortalPage() {
                     <div className="placeholder-box">
                       📋 <strong>Formulario de admisión</strong>
                       <br />
-                      Próximamente en este espacio (Bloque D — FormWizard con
-                      las 11 preguntas).
+                      <FormWizard
+                        contactId={contact.id}
+                        onComplete={() => handleStepComplete(3)} // tu handler que desbloquea el paso 4
+                      />
                     </div>
                   )}
                 </>
@@ -175,8 +179,11 @@ export default function PortalPage() {
                     <div className="placeholder-box">
                       📅 <strong>Confirmación de cita</strong>
                       <br />
-                      Próximamente en este espacio (Bloque E — ConfirmStep con
-                      calendario y reagendamiento).
+                      <ConfirmStep
+                        contactId={contact.id}
+                        appointment={contact.appointment} // la que cargaste en el login
+                        onComplete={() => handleStepComplete(4)}
+                      />
                     </div>
                   )}
                 </>
