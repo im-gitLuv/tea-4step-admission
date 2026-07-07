@@ -198,7 +198,8 @@ export default function ConfirmStep({ contactId, onComplete }) {
           <h3 className="cs-title">¡Todo listo!</h3>
           <p className="cs-sub">
             Tu cita quedó confirmada. Te esperamos — llega puntual y con buena
-            conexión.
+            conexión. Ya puedes cerrar esta pagina. Ah! y no olvides añadir tu
+            cita a tu calendario.
           </p>
           {hasAppt && <p className="cs-date">{formatDate(start)}</p>}
         </div>
