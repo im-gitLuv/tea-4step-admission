@@ -13,11 +13,12 @@ import { RESCHEDULE_WIDGET_URL } from "../lib/constants";
  * No usa el dato cacheado del login — el lead pudo haber agendado después.
  *
  * Al confirmar:
- *  1) POST /api/appointment { appointmentId } -> cambia el appointmentStatus
- *     real en GHL a "confirmed". Esto es CRÍTICO: si falla, se muestra
- *     error y no se avanza.
- *  2) POST /api/step-complete { contactId, step:4 } -> tag paso_4_completado,
- *     fire-and-forget, solo tracking, no bloquea si falla.
+ *  1) POST /api/appointment { appointmentId, contactId } -> en el servidor:
+ *     cambia el appointmentStatus real en GHL a "confirmed" (crítico) y
+ *     dispara el tag salescall-confirmed en el mismo instante (importante,
+ *     no bloqueante).
+ *  2) POST /api/step-complete { contactId, step:4 } -> tag paso_4_completado
+ *     de tracking del portal, fire-and-forget, no bloquea si falla.
  *
  * Props:
  *   contactId    (string, requerido)
@@ -142,12 +143,13 @@ export default function ConfirmStep({ contactId, onComplete }) {
     setConfirming(true);
     setError("");
 
-    // 1) Crítico: cambia el estado real de la cita en GHL a "confirmed".
+    // Un solo request: el servidor cambia el appointmentStatus a "confirmed"
+    // Y dispara el tag salescall-confirmed en el mismo instante.
     try {
       const res = await fetch("/api/appointment", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ appointmentId }),
+        body: JSON.stringify({ appointmentId, contactId }),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
@@ -156,10 +158,10 @@ export default function ConfirmStep({ contactId, onComplete }) {
     } catch (e) {
       setError(e.message || "Ocurrió un error. Intenta de nuevo.");
       setConfirming(false);
-      return; // no seguimos al tag si esto falló
+      return;
     }
 
-    // 2) No crítico: tag de tracking, fire-and-forget.
+    // Tag de tracking del portal, separado del tag de ventas. No crítico.
     try {
       await fetch("/api/step-complete", {
         method: "POST",
@@ -167,7 +169,7 @@ export default function ConfirmStep({ contactId, onComplete }) {
         body: JSON.stringify({ contactId, step: 4 }),
       });
     } catch (_) {
-      // el estado de la cita ya quedó confirmado; el tag es solo tracking
+      // el estado de la cita y el tag de ventas ya quedaron bien
     }
 
     setConfirmed(true);

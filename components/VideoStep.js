@@ -87,7 +87,7 @@ export default function VideoStep({ step, onProgress, onComplete }) {
         <span className="cta-bar-icon">🔊</span>
       </div>
 
-      {/*       {process.env.NODE_ENV === "development" && (
+      {process.env.NODE_ENV === "development" && (
         <button
           type="button"
           onClick={completeOnce}
@@ -109,7 +109,7 @@ export default function VideoStep({ step, onProgress, onComplete }) {
         >
           ⏭ Skip video (dev)
         </button>
-      )} */}
+      )}
     </div>
   );
 }

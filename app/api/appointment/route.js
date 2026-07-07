@@ -1,5 +1,9 @@
 import { NextResponse } from "next/server";
-import { getNextAppointment, confirmAppointment } from "../../../lib/ghl";
+import {
+  getNextAppointment,
+  confirmAppointment,
+  addTags,
+} from "../../../lib/ghl";
 
 /**
  * GET /api/appointment?contactId=xxx
@@ -34,12 +38,19 @@ export async function GET(request) {
 
 /**
  * POST /api/appointment
- * Body: { appointmentId: string }
+ * Body: { appointmentId: string, contactId: string }
  *
- * Confirma la cita en GHL (appointmentStatus -> "confirmed"). Esto SÍ es
- * crítico: si falla, el botón "Confirmar cita" del Step 4 debe mostrar
- * error y no avanzar — el estado real en el calendario de Luis es lo
- * que se está actualizando aquí, no solo un tag de tracking.
+ * Confirma la cita en GHL (appointmentStatus -> "confirmed") Y dispara el
+ * tag salescall-confirmed en el MISMO request, en el instante exacto del
+ * clic del lead. Antes el tag salescall-confirmed lo ponía alguna
+ * automatización nativa de GHL en otro momento (p. ej. al agendar) — al
+ * ponerlo aquí explícitamente, queda atado al clic real de confirmación,
+ * no a lo que dispare esa automatización por su cuenta.
+ *
+ * El cambio de appointmentStatus es crítico: si falla, se corta ahí y se
+ * devuelve error (el botón del Step 4 no debe avanzar). El tag es
+ * importante pero no bloqueante: si falla, igual devolvemos ok, con un
+ * aviso en el log — el estado real de la cita ya quedó bien.
  */
 export async function POST(request) {
   let body;
@@ -49,17 +60,20 @@ export async function POST(request) {
     return NextResponse.json({ error: "Body inválido." }, { status: 400 });
   }
 
-  const { appointmentId } = body || {};
+  const { appointmentId, contactId } = body || {};
   if (!appointmentId) {
     return NextResponse.json(
       { error: "Falta appointmentId." },
       { status: 400 },
     );
   }
+  if (!contactId) {
+    return NextResponse.json({ error: "Falta contactId." }, { status: 400 });
+  }
 
+  // 1) Crítico: cambia el estado real de la cita.
   try {
     await confirmAppointment(appointmentId);
-    return NextResponse.json({ ok: true });
   } catch (e) {
     console.error("[api/appointment POST] error confirmando cita:", e);
     return NextResponse.json(
@@ -67,4 +81,18 @@ export async function POST(request) {
       { status: 502 },
     );
   }
+
+  // 2) Importante pero no bloqueante: tag salescall-confirmed en el mismo
+  //    instante. Si falla, el status de la cita ya quedó confirmado —
+  //    no revertimos ni fallamos la respuesta por esto.
+  try {
+    await addTags(contactId, ["salescall-confirmed"]);
+  } catch (e) {
+    console.error(
+      "[api/appointment POST] tag salescall-confirmed falló (no crítico):",
+      e,
+    );
+  }
+
+  return NextResponse.json({ ok: true });
 }
