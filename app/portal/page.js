@@ -1,116 +1,271 @@
 "use client";
 
 // ─────────────────────────────────────────────────────────────
-// /portal — Los 4 pasos de admisión.
-// Bloque C: pasos 1 y 2 completos (video + continuar + unlock).
-// Bloque D: Step 3 (FormWizard) cableado.
-// Bloque E: Step 4 (ConfirmStep) cableado — consulta cita fresca.
+// /portal — RUNTIME MODULAR (Estrato 2 · BIG BANG).
+//
+// Los pasos, módulos, triggers y formularios YA NO están en el código:
+// llegan del estado del portal (/api/portal/state ← Supabase) y el
+// admin los edita en /admin/funnel. TEA es el primer tenant; cualquier
+// empresa puede tener su propio funnel sin tocar código.
+//
+// Compatibilidad v1: si no hay sesión de magic link (401) el usuario
+// cae al login v1, que sigue funcionando tal cual.
 // ─────────────────────────────────────────────────────────────
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useContact } from "@/lib/ContactContext";
-import { STEPS } from "@/lib/constants";
 import Header from "@/components/Header";
 import StepNav from "@/components/StepNav";
 import SideProgress from "@/components/SideProgress";
-import VideoStep from "@/components/VideoStep";
-import FormWizard from "@/components/FormWizard";
-import ConfirmStep from "@/components/ConfirmStep";
+import ModuleRenderer from "@/components/ModuleRenderer";
+
+// Evento al servidor: registra en event_log y devuelve efectos de triggers.
+async function postEvent(payload) {
+  try {
+    const res = await fetch("/api/event", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      keepalive: true,
+    });
+    if (!res.ok) return { effects: [] };
+    return await res.json();
+  } catch (_) {
+    return { effects: [] };
+  }
+}
+
+async function putCompleteStep(step) {
+  try {
+    await fetch("/api/event", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ step }),
+      keepalive: true,
+    });
+  } catch (_) {}
+}
 
 export default function PortalPage() {
   const router = useRouter();
-  const { contact, progress, setProgress, hydrated } = useContact();
 
+  const [state, setState] = useState(null); // estado del portal (server)
+  const [loading, setLoading] = useState(true);
   const [currentStep, setCurrentStep] = useState(1);
-  const [videoDone, setVideoDone] = useState({}); // { 1: true, ... }
-  const [videoProgress, setVideoProgress] = useState({}); // { 1: 45, ... }
+  const [completed, setCompleted] = useState([]);
+  const [revealedIds, setRevealedIds] = useState({});
+  const [videoDone, setVideoDone] = useState({}); // { [moduleId]: true }
+  const [videoProgress, setVideoProgress] = useState({}); // { [moduleId]: pct }
+  const [advancing, setAdvancing] = useState(false);
+  const lastBucketRef = useRef({});
+  const enteredRef = useRef({});
 
-  // Guard: sin sesión → login
+  // ── Cargar estado del portal ──
   useEffect(() => {
-    if (hydrated && !contact) router.replace("/login");
-  }, [hydrated, contact, router]);
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/portal/state", { cache: "no-store" });
+        if (res.status === 401 || res.status === 404) {
+          router.replace("/login");
+          return;
+        }
+        const data = await res.json();
+        if (!cancelled && data?.success && data?.state) {
+          const s = data.state;
+          setState(s);
+          setCompleted(s.progress?.completed || []);
+          setCurrentStep(Math.min(s.progress?.current || 1, s.steps?.length || 1));
+          const rev = {};
+          (s.steps || []).forEach((st) =>
+            st.modules.forEach((m) => {
+              if (m.revealed) rev[m.id] = true;
+            })
+          );
+          setRevealedIds(rev);
+        }
+      } catch (_) {
+        router.replace("/login");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
 
-  // Restaurar progreso guardado (refresh de página)
+  const steps = state?.steps || [];
+  const step = steps.find((s) => s.position === currentStep) || null;
+  const total = steps.length;
+
+  // ── Registrar entrada a cada paso ("¿dónde se quedó?") ──
   useEffect(() => {
-    if (hydrated && progress) {
-      setCurrentStep(progress.current || 1);
-      const done = {};
-      (progress.completed || []).forEach((id) => (done[id] = true));
-      setVideoDone(done);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hydrated]);
+    if (!state || !currentStep) return;
+    if (enteredRef.current[currentStep]) return;
+    enteredRef.current[currentStep] = true;
+    postEvent({ type: "step_entered", step: currentStep });
+  }, [state, currentStep]);
 
-  if (!hydrated || !contact) return null;
-
-  const completed = progress.completed || [];
-  // Desbloqueados: paso 1 siempre + todo paso cuyo anterior esté completado
+  // ── Desbloqueo secuencial (igual que la v1) ──
   const unlocked = [1];
-  for (let i = 2; i <= 4; i++) {
+  for (let i = 2; i <= total; i++) {
     if (completed.includes(i - 1)) unlocked.push(i);
   }
-  // Pasos ya completados también son accesibles
   completed.forEach((id) => {
     if (!unlocked.includes(id)) unlocked.push(id);
   });
 
-  function goStep(id) {
-    if (!unlocked.includes(id)) return;
-    setCurrentStep(id);
-    setProgress({ ...progress, current: id });
+  function goStep(pos) {
+    if (!unlocked.includes(pos)) return;
+    setCurrentStep(pos);
   }
 
-  // Único punto de avance de paso — lo llaman el botón "Continuar" (pasos 1-2),
-  // FormWizard (paso 3) y ConfirmStep (paso 4) al completar cada uno.
-  async function completeStep(id) {
-    if (completed.includes(id)) return;
-    const newCompleted = [...completed, id];
-    const nextStep = Math.min(id + 1, 4);
-    setProgress({ completed: newCompleted, current: nextStep });
-    setCurrentStep(nextStep);
-
-    // Tag en GHL (fire-and-forget: no bloquea al lead si falla)
-    try {
-      await fetch("/api/step-complete", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ contactId: contact.id, step: id }),
+  // ── Aplicar efectos de triggers que llegan del servidor ──
+  const applyEffects = useCallback(
+    (effects) => {
+      (effects || []).forEach((e) => {
+        if (e.action_type === "reveal_module" && e.module_id) {
+          setRevealedIds((r) => ({ ...r, [e.module_id]: true }));
+        }
+        if (e.action_type === "complete_step" && e.step_position) {
+          completeStepLocal(e.step_position);
+        }
       });
-    } catch (_) {}
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [completed]
+  );
+
+  // ── Único punto de avance de paso ──
+  function completeStepLocal(pos) {
+    setCompleted((prev) => {
+      if (prev.includes(pos)) return prev;
+      const next = [...prev, pos].sort((a, b) => a - b);
+      const nextStep = Math.min(pos + 1, total);
+      setCurrentStep(nextStep);
+      return next;
+    });
   }
 
-  function handleVideoProgress(id, pct) {
-    setVideoProgress((p) => ({ ...p, [id]: pct }));
+  async function completeStepServer(pos) {
+    if (completed.includes(pos)) return;
+    await putCompleteStep(pos);
+    completeStepLocal(pos);
   }
 
-  function handleVideoEnded(id) {
-    setVideoDone((d) => ({ ...d, [id]: true }));
-    setVideoProgress((p) => ({ ...p, [id]: 100 }));
+  // ── Callbacks de los módulos ──
+  function handleVideoProgress(module, pct) {
+    setVideoProgress((p) => ({ ...p, [module.id]: pct }));
+
+    // Throttle: un evento por cada 10% recorrido (el primero = video_started)
+    const bucket = Math.floor(pct / 10);
+    if (lastBucketRef.current[module.id] !== bucket) {
+      const prev = lastBucketRef.current[module.id];
+      lastBucketRef.current[module.id] = bucket;
+      const type = bucket === 1 && (prev === undefined || prev === 0) ? "video_started" : "video_progress";
+      postEvent({ type, step: currentStep, moduleId: module.id, value: { pct: Math.round(pct) } });
+    }
   }
 
-  const step = STEPS.find((s) => s.id === currentStep);
+  function handleVideoEnded(module) {
+    setVideoDone((d) => ({ ...d, [module.id]: true }));
+    setVideoProgress((p) => ({ ...p, [module.id]: 100 }));
+    postEvent({ type: "video_ended", step: currentStep, moduleId: module.id, value: { pct: 100 } }).then((out) =>
+      applyEffects(out?.effects)
+    );
+  }
+
+  function handleButtonClick(module) {
+    const action = module.config?.action || "next";
+    postEvent({ type: "button_clicked", step: currentStep, moduleId: module.id, value: { action } }).then((out) =>
+      applyEffects(out?.effects)
+    );
+    if (action === "next" || action === "complete") {
+      completeStepServer(currentStep);
+    }
+  }
+
+  function handleDownload(module) {
+    postEvent({ type: "download_clicked", step: currentStep, moduleId: module.id });
+  }
+
+  function handleView(module) {
+    postEvent({ type: "module_viewed", step: currentStep, moduleId: module.id });
+  }
+
+  function handleFormComplete() {
+    // El servidor ya completó el paso (complete_on_submit) y devolvió
+    // triggers; aquí solo avanzamos la UI.
+    completeStepLocal(currentStep);
+  }
+
+  function handleSchedulerComplete() {
+    completeStepLocal(currentStep);
+  }
+
+  // ── Botón "Continuar" por defecto (paridad v1 para pasos 1-2) ──
+  // Se muestra solo si el paso NO tiene un mecanismo propio de avance
+  // (button visible con next/complete, form o scheduler visibles).
+  const visibleModules = (step?.modules || []).filter((m) => !m.gated || revealedIds[m.id]);
+  const hasOwnAdvance = visibleModules.some(
+    (m) =>
+      (m.type === "button" && m.config?.action !== "url") ||
+      m.type === "form" ||
+      m.type === "scheduler"
+  );
+  const stepVideos = visibleModules.filter((m) => m.type === "video");
+  const allVideosDone =
+    stepVideos.length === 0 ||
+    stepVideos
+      .filter((m) => m.config?.require_full_watch !== false)
+      .every((m) => videoDone[m.id]);
+
+  if (loading || !state) {
+    return (
+      <div className="page" style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "60vh" }}>
+        <div className="disclaimer">Cargando tu portal…</div>
+      </div>
+    );
+  }
+
+  const brand = state.tenant?.brand || {};
 
   return (
-    <div className="page">
-      <Header contact={contact} />
+    <div
+      className="page"
+      style={
+        {
+          "--tea-red": brand.primary || undefined,
+          "--tea-blue": brand.secondary || undefined,
+          "--tea-dark": brand.dark || undefined,
+          "--tea-light": brand.light || undefined,
+        }
+      }
+    >
+      <Header
+        contact={state.participant}
+        brand={brand}
+        tenantName={state.tenant?.name}
+      />
 
       <div className="page-head">
         <div className="page-title">
-          Pasos de <span>Admisión</span> — Talk English Academy
+          {state.funnel?.title || "Pasos"} de <span>Admisión</span> — {state.tenant?.name}
         </div>
         <div className="page-sub">
           <span style={{ fontSize: 14 }}>👉</span>
           <span>
             Completa los{" "}
-            <strong style={{ color: "var(--tea-red)" }}>4 pasos</strong> antes
-            de tu cita programada
+            <strong style={{ color: "var(--tea-red)" }}>{total} pasos</strong> antes de tu cita
+            programada
           </span>
           <span style={{ fontSize: 14 }}>👈</span>
         </div>
       </div>
 
       <StepNav
+        steps={steps}
         currentStep={currentStep}
         completed={completed}
         unlocked={unlocked}
@@ -121,71 +276,43 @@ export default function PortalPage() {
         {/* ── Panel principal ── */}
         <div>
           <div className="step-content active" key={currentStep}>
-            <VideoStep
-              step={step}
-              onProgress={(pct) => handleVideoProgress(currentStep, pct)}
-              onComplete={() => handleVideoEnded(currentStep)}
-            />
+            {step && step.headline && (
+              <h2 style={{ color: "var(--tea-dark)", fontSize: 20, margin: "0 0 14px" }}>{step.headline}</h2>
+            )}
+
+            {(step?.modules || []).map((m) => (
+              <div key={m.id} style={{ marginBottom: 18 }}>
+                <ModuleRenderer
+                  module={{ ...m, revealed: Boolean(revealedIds[m.id]) }}
+                  step={step}
+                  callbacks={{
+                    onVideoProgress: handleVideoProgress,
+                    onVideoEnded: handleVideoEnded,
+                    onButtonClick: handleButtonClick,
+                    onDownload: handleDownload,
+                    onView: handleView,
+                    onFormComplete: handleFormComplete,
+                    onSchedulerComplete: handleSchedulerComplete,
+                  }}
+                />
+              </div>
+            ))}
 
             <div className="step-footer">
-              {/* Pasos 1 y 2: botón continuar */}
-              {(currentStep === 1 || currentStep === 2) && (
+              {!hasOwnAdvance && (
                 <>
                   <button
                     className="next-btn"
-                    disabled={
-                      !videoDone[currentStep] &&
-                      !completed.includes(currentStep)
-                    }
-                    onClick={() => completeStep(currentStep)}
+                    disabled={!allVideosDone && !completed.includes(currentStep)}
+                    onClick={() => completeStepServer(currentStep)}
                   >
                     {completed.includes(currentStep)
                       ? "Paso completado ✓"
-                      : `Continuar al paso ${currentStep + 1} »`}
+                      : `Continuar al paso ${Math.min(currentStep + 1, total)} »`}
                   </button>
-                  <div className="disclaimer">
-                    *Este video debe ser visto en su totalidad para avanzar al
-                    siguiente paso.
-                  </div>
-                </>
-              )}
-
-              {/* Paso 3: formulario (Bloque D) */}
-              {currentStep === 3 && (
-                <>
-                  {!videoDone[3] && !completed.includes(3) ? (
+                  {stepVideos.some((m) => m.config?.require_full_watch !== false) && (
                     <div className="disclaimer">
-                      *Podrá completar el formulario después de ver el video.
-                    </div>
-                  ) : (
-                    <div className="placeholder-box">
-                      📋 <strong>Formulario de admisión</strong>
-                      <br />
-                      <FormWizard
-                        contactId={contact.id}
-                        onComplete={() => completeStep(3)}
-                      />
-                    </div>
-                  )}
-                </>
-              )}
-
-              {/* Paso 4: confirmación de cita (Bloque E) */}
-              {currentStep === 4 && (
-                <>
-                  {!videoDone[4] && !completed.includes(4) ? (
-                    <div className="disclaimer">
-                      *Después de ver el video podrá confirmar su cita
-                      programada.
-                    </div>
-                  ) : (
-                    <div className="placeholder-box">
-                      📅 <strong>Confirmación de cita</strong>
-                      <br />
-                      <ConfirmStep
-                        contactId={contact.id}
-                        onComplete={() => completeStep(4)}
-                      />
+                      *Este video debe ser visto en su totalidad para avanzar al siguiente paso.
                     </div>
                   )}
                 </>
@@ -196,10 +323,11 @@ export default function PortalPage() {
 
         {/* ── Sidebar ── */}
         <SideProgress
+          steps={steps}
           currentStep={currentStep}
           completed={completed}
           unlocked={unlocked}
-          videoProgress={videoProgress[currentStep] || 0}
+          videoProgress={videoProgress[stepVideos[0]?.id] || 0}
           onGo={goStep}
         />
       </div>

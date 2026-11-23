@@ -1,31 +1,22 @@
 "use client";
 
+// ─────────────────────────────────────────────────────────────
+// SchedulerModule — confirmación de cita data-driven (Estrato 2).
+//
+// Consulta la próxima cita con fetch fresco a /api/appointment (v2:
+// sin contactId — el servidor usa la cookie; GHL si hay contacto
+// enlazado, tabla appointments si no). Al confirmar:
+//   POST /api/appointment { appointmentId, moduleId } → el servidor
+//   confirma en GHL (si aplica), registra la cita, dispara los
+//   triggers appointment_confirmed y completa el paso si el módulo
+//   lo pide (complete_on_confirm ≠ false).
+//
+// Config: { provider, reschedule_widget_url, complete_on_confirm,
+//           duration_min, title }
+// ─────────────────────────────────────────────────────────────
+
 import { useEffect, useState } from "react";
-// Ajusta la ruta/nombre según tu lib/constants.js.
-// Se espera la URL del widget de reagendar del calendario Sales Call (DX1pbtzm6YUeytHYMjzW).
-import { RESCHEDULE_WIDGET_URL } from "../lib/constants";
 
-/**
- * ConfirmStep — Step 4 de admisión (Bloque E)
- *
- * Consulta la próxima cita del lead con un fetch fresco a /api/appointment,
- * SCOPED al calendario de Sales Call exclusivamente (ver lib/ghl.js).
- * No usa el dato cacheado del login — el lead pudo haber agendado después.
- *
- * Al confirmar:
- *  1) POST /api/appointment { appointmentId, contactId } -> en el servidor:
- *     cambia el appointmentStatus real en GHL a "confirmed" (crítico) y
- *     dispara el tag salescall-confirmed en el mismo instante (importante,
- *     no bloqueante).
- *  2) POST /api/step-complete { contactId, step:4 } -> tag paso_4_completado
- *     de tracking del portal, fire-and-forget, no bloquea si falla.
- *
- * Props:
- *   contactId    (string, requerido)
- *   onComplete   (fn) — se llama tras confirmar OK (marca el portal como terminado)
- */
-
-const DEFAULT_TITLE = "Sesión de Diagnóstico · Talk English Academy";
 const DEFAULT_DURATION_MIN = 45;
 
 function formatDate(date) {
@@ -44,12 +35,8 @@ function formatDate(date) {
   }
 }
 
-// Formato UTC compacto para links de calendario: YYYYMMDDTHHMMSSZ
 function toCalUTC(date) {
-  return date
-    .toISOString()
-    .replace(/[-:]/g, "")
-    .replace(/\.\d{3}/, "");
+  return date.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
 }
 
 function googleCalUrl(title, start, end) {
@@ -57,7 +44,7 @@ function googleCalUrl(title, start, end) {
     action: "TEMPLATE",
     text: title,
     dates: `${toCalUTC(start)}/${toCalUTC(end)}`,
-    details: "Tu cita con Talk English Academy.",
+    details: "Tu cita con el equipo de admisiones.",
   });
   return `https://calendar.google.com/calendar/render?${p.toString()}`;
 }
@@ -73,18 +60,18 @@ function outlookCalUrl(title, start, end) {
   return `https://outlook.live.com/calendar/0/deeplink/compose?${p.toString()}`;
 }
 
-function downloadIcs(title, start, end) {
+function downloadIcs(title, start, end, filenameBase) {
   const ics = [
     "BEGIN:VCALENDAR",
     "VERSION:2.0",
-    "PRODID:-//Talk English Academy//Admision//ES",
+    "PRODID:-//PortalAdmision//ES",
     "BEGIN:VEVENT",
-    `UID:${Date.now()}@talkenglishaca.com`,
+    `UID:${Date.now()}@portal.local`,
     `DTSTAMP:${toCalUTC(new Date())}`,
     `DTSTART:${toCalUTC(start)}`,
     `DTEND:${toCalUTC(end)}`,
     `SUMMARY:${title}`,
-    "DESCRIPTION:Tu cita con Talk English Academy.",
+    "DESCRIPTION:Tu cita con el equipo de admisiones.",
     "END:VEVENT",
     "END:VCALENDAR",
   ].join("\r\n");
@@ -92,12 +79,17 @@ function downloadIcs(title, start, end) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = "cita-talk-english-academy.ics";
+  a.download = `${filenameBase || "mi-cita"}.ics`;
   a.click();
   URL.revokeObjectURL(url);
 }
 
-export default function ConfirmStep({ contactId, onComplete }) {
+export default function SchedulerModule({ module, onComplete }) {
+  const cfg = module?.config || {};
+  const durationMin = Number(cfg.duration_min || DEFAULT_DURATION_MIN);
+  const title = cfg.title || "Sesión de Diagnóstico";
+  const widgetUrl = cfg.reschedule_widget_url || cfg.booking_url || "";
+
   const [loading, setLoading] = useState(true);
   const [appointmentId, setAppointmentId] = useState(null);
   const [startTime, setStartTime] = useState(null);
@@ -105,14 +97,11 @@ export default function ConfirmStep({ contactId, onComplete }) {
   const [confirmed, setConfirmed] = useState(false);
   const [error, setError] = useState("");
 
-  // Fetch fresco al montar — scoped al calendario de Sales Call (ver lib/ghl.js).
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch(
-          `/api/appointment?contactId=${encodeURIComponent(contactId)}`,
-        );
+        const res = await fetch("/api/appointment", { cache: "no-store" });
         const data = await res.json();
         if (!cancelled) {
           setAppointmentId(data?.id || null);
@@ -130,51 +119,32 @@ export default function ConfirmStep({ contactId, onComplete }) {
     return () => {
       cancelled = true;
     };
-  }, [contactId]);
+  }, []);
 
   const start = startTime ? new Date(startTime) : null;
-  const hasAppt = !!start && !isNaN(start) && !!appointmentId;
-  const end = hasAppt
-    ? new Date(start.getTime() + DEFAULT_DURATION_MIN * 60000)
-    : null;
-  const title = DEFAULT_TITLE;
+  const hasAppt = !!start && !isNaN(start);
+  const end = hasAppt ? new Date(start.getTime() + durationMin * 60000) : null;
 
   async function confirm() {
     setConfirming(true);
     setError("");
-
-    // Un solo request: el servidor cambia el appointmentStatus a "confirmed"
-    // Y dispara el tag salescall-confirmed en el mismo instante.
     try {
       const res = await fetch("/api/appointment", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ appointmentId, contactId }),
+        body: JSON.stringify({ appointmentId, moduleId: module.id }),
       });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) {
         throw new Error(data.error || "No pudimos confirmar tu cita.");
       }
+      setConfirmed(true);
+      if (typeof onComplete === "function") onComplete();
     } catch (e) {
       setError(e.message || "Ocurrió un error. Intenta de nuevo.");
+    } finally {
       setConfirming(false);
-      return;
     }
-
-    // Tag de tracking del portal, separado del tag de ventas. No crítico.
-    try {
-      await fetch("/api/step-complete", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ contactId, step: 4 }),
-      });
-    } catch (_) {
-      // el estado de la cita y el tag de ventas ya quedaron bien
-    }
-
-    setConfirmed(true);
-    setConfirming(false);
-    if (typeof onComplete === "function") onComplete();
   }
 
   if (loading) {
@@ -197,9 +167,8 @@ export default function ConfirmStep({ contactId, onComplete }) {
           <div className="cs-check">✓</div>
           <h3 className="cs-title">¡Todo listo!</h3>
           <p className="cs-sub">
-            Tu cita quedó confirmada. Te esperamos — llega puntual y con buena
-            conexión. Ya puedes cerrar esta pagina. Ah! y no olvides añadir tu
-            cita a tu calendario.
+            Tu cita quedó confirmada. Te esperamos — llega puntual y con buena conexión.
+            Ya puedes cerrar esta página. ¡Y no olvides añadir tu cita a tu calendario!
           </p>
           {hasAppt && <p className="cs-date">{formatDate(start)}</p>}
         </div>
@@ -212,66 +181,39 @@ export default function ConfirmStep({ contactId, onComplete }) {
           </div>
 
           <div className="cs-calrow">
-            <a
-              className="cs-cal"
-              href={googleCalUrl(title, start, end)}
-              target="_blank"
-              rel="noopener noreferrer"
-            >
+            <a className="cs-cal" href={googleCalUrl(title, start, end)} target="_blank" rel="noopener noreferrer">
               Google Calendar
             </a>
-            <a
-              className="cs-cal"
-              href={outlookCalUrl(title, start, end)}
-              target="_blank"
-              rel="noopener noreferrer"
-            >
+            <a className="cs-cal" href={outlookCalUrl(title, start, end)} target="_blank" rel="noopener noreferrer">
               Outlook
             </a>
-            <button
-              className="cs-cal"
-              type="button"
-              onClick={() => downloadIcs(title, start, end)}
-            >
+            <button className="cs-cal" type="button" onClick={() => downloadIcs(title, start, end)}>
               Descargar .ics
             </button>
           </div>
 
           {error && <div className="cs-error">{error}</div>}
 
-          <button
-            className="cs-btn cs-btn-primary"
-            onClick={confirm}
-            disabled={confirming}
-          >
+          <button className="cs-btn cs-btn-primary" onClick={confirm} disabled={confirming}>
             {confirming ? "Confirmando…" : "Confirmar cita"}
           </button>
 
-          <a
-            className="cs-reschedule"
-            href={RESCHEDULE_WIDGET_URL}
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            ¿Necesitas otro horario? Reagendar
-          </a>
+          {widgetUrl && (
+            <a className="cs-reschedule" href={widgetUrl} target="_blank" rel="noopener noreferrer">
+              ¿Necesitas otro horario? Reagendar
+            </a>
+          )}
         </div>
       ) : (
-        // Edge case: no hay cita en el calendario de Sales Call todavía.
         <div className="cs-card">
           <h3 className="cs-title">No hay fecha agendada aún</h3>
-          <p className="cs-sub">
-            Agenda tu cita para completar tu admisión — es el último paso.
-          </p>
+          <p className="cs-sub">Agenda tu cita para completar tu admisión — es el último paso.</p>
           {error && <div className="cs-error">{error}</div>}
-          <a
-            className="cs-btn cs-btn-primary cs-btn-link"
-            href={RESCHEDULE_WIDGET_URL}
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Agendar mi cita
-          </a>
+          {widgetUrl && (
+            <a className="cs-btn cs-btn-primary cs-btn-link" href={widgetUrl} target="_blank" rel="noopener noreferrer">
+              Agendar mi cita
+            </a>
+          )}
         </div>
       )}
     </div>
@@ -279,8 +221,7 @@ export default function ConfirmStep({ contactId, onComplete }) {
 }
 
 const CSS = `
-.cs-root{--tea-blue:#283A97;--tea-red:#EA0029;--tea-dark:#0F145B;--tea-light:#4789C8;
-  font-family:'Work Sans',system-ui,-apple-system,sans-serif;max-width:640px;margin:0 auto;width:100%}
+.cs-root{font-family:'Work Sans',system-ui,-apple-system,sans-serif;max-width:640px;margin:0 auto;width:100%}
 .cs-card{background:#fff;border:1px solid #ebebeb;border-radius:14px;padding:24px 20px;box-shadow:0 1px 5px rgba(87,100,126,.10);text-align:center}
 .cs-title{color:var(--tea-dark);font-size:20px;font-weight:700;margin:0 0 6px}
 .cs-sub{color:#4a5170;font-size:14px;line-height:1.5;margin:0 0 18px}
