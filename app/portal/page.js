@@ -272,7 +272,8 @@ export default function PortalPage() {
         <div className="page-sub">
           <span style={{ fontSize: 14 }}>👉</span>
           <span>
-            Completa los <strong style={{ color: "var(--tea-red)">{total} pasos</strong> antes de tu cita
+            Completa los{" "}
+            <strong style={{ color: "var(--tea-red)" }}>{total} pasos</strong> antes de tu cita
             programada
           </span>
           <span style={{ fontSize: 14 }}>👈</span>
