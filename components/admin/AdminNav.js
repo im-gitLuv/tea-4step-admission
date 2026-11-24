@@ -7,10 +7,13 @@
 import Link from "next/link";
 import { useRouter, usePathname } from "next/navigation";
 
-/** fetch con cookie de sesión admin; 401 → login. */
+/** fetch con cookie de sesión admin; 401 → login.
+ *  cache: "no-store" — evita que el navegador sirva respuestas
+ *  viejas (KPIs/listados desactualizados) para las llamadas admin. */
 export async function adminApi(path, opts = {}) {
   const res = await fetch(path, {
     credentials: "include",
+    cache: "no-store",
     ...opts,
     headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
   });

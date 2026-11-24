@@ -37,13 +37,16 @@ async function postEvent(payload) {
 
 async function putCompleteStep(step) {
   try {
-    await fetch("/api/event", {
+    const res = await fetch("/api/event", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ step }),
       keepalive: true,
     });
-  } catch (_) {}
+    return res.ok; // true solo si el servidor CONFIRMÓ el guardado
+  } catch (_) {
+    return false;
+  }
 }
 
 export default function PortalPage() {
@@ -56,6 +59,7 @@ export default function PortalPage() {
   const [revealedIds, setRevealedIds] = useState({});
   const [videoDone, setVideoDone] = useState({}); // { [moduleId]: true }
   const [videoProgress, setVideoProgress] = useState({}); // { [moduleId]: pct }
+  const [saveError, setSaveError] = useState("");
   const [advancing, setAdvancing] = useState(false);
   const lastBucketRef = useRef({});
   const enteredRef = useRef({});
@@ -139,6 +143,7 @@ export default function PortalPage() {
 
   // ── Único punto de avance de paso ──
   function completeStepLocal(pos) {
+    setSaveError("");
     setCompleted((prev) => {
       if (prev.includes(pos)) return prev;
       const next = [...prev, pos].sort((a, b) => a - b);
@@ -150,8 +155,19 @@ export default function PortalPage() {
 
   async function completeStepServer(pos) {
     if (completed.includes(pos)) return;
-    await putCompleteStep(pos);
-    completeStepLocal(pos);
+    setAdvancing(true);
+    const ok = await putCompleteStep(pos);
+    setAdvancing(false);
+    // FIX: solo avanzamos la UI si el servidor confirmó el guardado.
+    // Antes la UI avanzaba aunque el PUT fallara → progreso visible
+    // que nunca llegaba a Supabase (incongruencia portal ↔ admin).
+    if (ok) {
+      completeStepLocal(pos);
+    } else {
+      setSaveError(
+        "No pudimos guardar tu avance. Verifica tu conexión e inténtalo de nuevo — tu progreso NO se perderá."
+      );
+    }
   }
 
   // ── Callbacks de los módulos ──
@@ -256,8 +272,7 @@ export default function PortalPage() {
         <div className="page-sub">
           <span style={{ fontSize: 14 }}>👉</span>
           <span>
-            Completa los{" "}
-            <strong style={{ color: "var(--tea-red)" }}>{total} pasos</strong> antes de tu cita
+            Completa los <strong style={{ color: "var(--tea-red)">{total} pasos</strong> antes de tu cita
             programada
           </span>
           <span style={{ fontSize: 14 }}>👈</span>
@@ -298,15 +313,23 @@ export default function PortalPage() {
               </div>
             ))}
 
+            {saveError && (
+              <div className="disclaimer" style={{ color: "#b00020", fontWeight: 600 }}>
+                ⚠ {saveError}
+              </div>
+            )}
+
             <div className="step-footer">
               {!hasOwnAdvance && (
                 <>
                   <button
                     className="next-btn"
-                    disabled={!allVideosDone && !completed.includes(currentStep)}
+                    disabled={(!allVideosDone && !completed.includes(currentStep)) || advancing}
                     onClick={() => completeStepServer(currentStep)}
                   >
-                    {completed.includes(currentStep)
+                    {advancing
+                      ? "Guardando…"
+                      : completed.includes(currentStep)
                       ? "Paso completado ✓"
                       : `Continuar al paso ${Math.min(currentStep + 1, total)} »`}
                   </button>
